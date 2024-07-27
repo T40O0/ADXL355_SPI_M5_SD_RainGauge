@@ -4,7 +4,7 @@
 ## Prerequisite
  - ADXL355 ([EVAL-ADXL355-PMDZ](https://www.analog.com/en/products/adxl355.html#product-overview))
  - [M5Stack Tough](https://docs.m5stack.com/en/core/tough)
- - [hat](3D_model/hat.stl)
+ - [hat](https://github.com/T40O0/ADXL355_SPI_M5_SD_FIR/blob/main/3D_model/hat.stl)
  - [modified version](https://github.com/T40O0/M5_ADXL355/tree/M5) of [plasmapper/adxl355-arduino](https://github.com/plasmapper/adxl355-arduino)  
 Hats off to PL.
 
@@ -24,7 +24,7 @@ Hats off to PL.
    - 10gal exceedance frequency x 0.0004399 (mm)
  - Data are recorded every minute. These can be aggregated to estimate the rainfall every 10 minutes or hour.
  - A 1000 Hz high-cut filter is applied to the data output at 4000 Hz from the ADXL355. This is re-sampled at 100 Hz without a decimation filter, so frequency analysis is not possible. If you are interested in frequencies, click here [MEMS Seismometer](https://github.com/T40O0/ADXL355_SPI_M5_SD_FIR).
- - A "[hat](3D_model/hat.stl)" is required.
+ - A "[hat](https://github.com/T40O0/ADXL355_SPI_M5_SD_FIR/blob/main/3D_model/hat.stl)" is required.
    - [x] Blocks sunlight and protects the LCD.
    - [x] Falling volcanic ash is washed away by rain.
  - Do not submerge the case in water or other liquids.
