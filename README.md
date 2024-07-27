@@ -19,7 +19,7 @@ Hats off to PL.
  - Visit me on [MEMS Seismometer](https://github.com/T40O0/ADXL355_SPI_M5_SD_FIR)
 
 ## Note
- - In my area, rainfall estimates using the following coefficients gave R2 = 0.97 with hourly rainfall (mm/h) from a tipping bucket gauge 20 metres away.
+ - In my area, rainfall estimates using the following coefficients gave R2 = 0.97 with hourly rainfall (mm/h) from a tipping bucket rain gauge 20 metres away.
    - 5gal exceedance frequency x 0.0002281 (mm)
    - 10gal exceedance frequency x 0.0004399 (mm)
  - Data are recorded every minute. These can be aggregated to estimate the rainfall every 10 minutes or hour.
