@@ -11,7 +11,6 @@ Hats off to PL.
  - Cheap; can be made for about 100€.
  - Record the number of times the set acceleration of 4 steps is exceeded and the total acceleration.
  - Multiply the number of times by a coefficient and convert to rainfall (mm).
- - 100Hz sampling (with 50Hz high-cut FIR filter)
  - Stores files on TF card.
  - No need to worry about clogging caused by volcanic ash etc. that occurs with tipping bucket rain gauges.
 
