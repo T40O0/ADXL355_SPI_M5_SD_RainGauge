@@ -3,7 +3,8 @@
 
 ## Prerequisite
  - ADXL355 ([EVAL-ADXL355-PMDZ](https://www.analog.com/en/products/adxl355.html#product-overview))
- - [M5Stack Tough](https://docs.m5stack.com/en/core/tough) 
+ - [M5Stack Tough](https://docs.m5stack.com/en/core/tough)
+ - [hat](3D_model/hat.stl)
  - [modified version](https://github.com/T40O0/M5_ADXL355/tree/M5) of [plasmapper/adxl355-arduino](https://github.com/plasmapper/adxl355-arduino)  
 Hats off to PL.
 
