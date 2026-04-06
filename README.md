@@ -1,5 +1,6 @@
 # MEMS Rain Gauge  
 <img src="images/1.JPG"  width="800">
+<img src="images/2.png"  width="800">
 
 ## Prerequisite
  - ADXL355 ([EVAL-ADXL355-PMDZ](https://www.analog.com/en/products/adxl355.html#product-overview))
