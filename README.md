@@ -36,7 +36,8 @@ After any of the above (or after the 30 second timeout), measurement begins at t
    - 5 gal exceedance frequency × 0.0002281 (mm)
    - 10 gal exceedance frequency × 0.0004399 (mm)
  - Data are recorded one row per minute. Rows can be aggregated to estimate rainfall every 10 minutes, hourly, etc.
- - The ADXL355 runs at ODR=4000 Hz so its built-in 1000 Hz LPF is wide enough to preserve the high-frequency raindrop impulses. Samples are read at 100 Hz without an external decimation FIR — aliasing is intentionally allowed because rain detection counts threshold crossings rather than reconstructs spectra. **Do not change ODR**: the calibration coefficients above were determined at ODR=4000 and would need to be re-derived if the ODR is changed. For frequency analysis, see the [MEMS Seismometer](https://github.com/T40O0/ADXL355_SPI_M5_SD_FIR) instead.
+ - **Sampling**: ADXL355 ODR=4000 Hz → polled at 100 Hz in software → aggregated to 1 CSV row per minute. The wide ODR keeps the built-in 1000 Hz LPF from cutting raindrop impulses.
+ - Aliasing is allowed by design — only threshold counts matter, not spectra. For frequency analysis, see the [MEMS Seismometer](https://github.com/T40O0/ADXL355_SPI_M5_SD_FIR) instead.
  - **RTC year range**: measurements only start when the RTC year is in 2026..2099. Edit `setup()` if needed.
  - **NTP setup**: edit the defines near the top of the sketch to fit your environment.  
    `#define NTP_TIMEZONE  "your zone"`  
