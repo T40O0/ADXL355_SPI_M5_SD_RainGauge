@@ -33,7 +33,12 @@
 #endif
 //==============================================================================
 
-unsigned int hz = 100;
+// Outer loop runs at 200 Hz (5 ms period). At ODR=4000 Hz the ADXL355 FIFO
+// (32 triplets max) fills in 8 ms, so a 5 ms drain interval keeps it well
+// below the overflow threshold while halving the wakeup count vs a 1000 Hz
+// loop. SLOW_DIV gates the 100 Hz threshold tick to every 2nd iteration.
+unsigned int hz = 200;
+const unsigned int SLOW_DIV = 2;   // 200 / 100
 unsigned int dtWrite = 1000 / hz;
 unsigned int SDWriteTime = 60;
 
@@ -48,18 +53,26 @@ int fileDate = 0;
 File f;
 
 double Acc = 0.;
+// Total FIFO triplets actually drained over the current 1-minute window.
+// Expected steady-state value ~= ODR (4000) * 60 = 240000. Deviations
+// indicate FIFO overflow or scheduler slip.
+uint32_t samp4kCount = 0;
 double AccThres0 = 5.;
-double AccCount0 = 0.;
-int binaryCount0 = 0;
+// double AccCount0 = 0.;  // sum disabled
+int binaryCount0 = 0;     // 100 Hz exceed count (decimated last_Acc, no LPF)
+int binary4k0     = 0;    // 4000 Hz exceed count (every FIFO sample, sensor LPF only)
 double AccThres1 = 10.0;
-double AccCount1 = 0.;
+// double AccCount1 = 0.;  // sum disabled
 int binaryCount1 = 0;
+int binary4k1     = 0;
 double AccThres2 = 20.0;
-double AccCount2 = 0.;
+// double AccCount2 = 0.;  // sum disabled
 int binaryCount2 = 0;
+int binary4k2     = 0;
 double AccThres3 = 30.;
-double AccCount3 = 0.;
+// double AccCount3 = 0.;  // sum disabled
 int binaryCount3 = 0;
+int binary4k3     = 0;
 
 // CSV header carrying the threshold values for each column.
 String accHeader;
@@ -70,6 +83,15 @@ const size_t ACCDATA_RESERVE = 256;
 // Drop count (missed batches when the SD queue is full) .
 volatile uint32_t dropCount = 0;
 volatile uint32_t batchOkCount = 0;
+
+// Display snapshot of the last completed minute. TaskRead copies the
+// threshold counters here just before resetting them; TaskSave reads
+// the snapshot to draw the 5-second status panel each minute.
+// double   dispSum0 = 0., dispSum1 = 0., dispSum2 = 0., dispSum3 = 0.;  // sum disabled
+uint32_t dispBin0 = 0,  dispBin1 = 0,  dispBin2 = 0,  dispBin3 = 0;   // 100 Hz
+uint32_t disp4k0  = 0,  disp4k1  = 0,  disp4k2  = 0,  disp4k3  = 0;   // 4000 Hz
+uint32_t dispSamp4k = 0;                                              // total drained samples
+portMUX_TYPE dispMux = portMUX_INITIALIZER_UNLOCKED;
 
 //==============================================================================
 
@@ -209,6 +231,29 @@ static void rtcConfirmScreen() {
 }
 
 //==============================================================================
+
+// Common tail for every RTC-setting path: mirror the just-written M5 RTC
+// into the system clock and show the 10-second confirmation screen.
+// Used by:
+//   - Set_RTC: after writing the NTP-derived time into the RTC
+//   - Manual_Set: after writing the user-input time into the RTC
+//   - setup() menu timeout: nothing else has touched the system clock yet
+static void applyRtcAndConfirm() {
+  auto rtcDt = M5.Rtc.getDateTime();
+  struct tm tmRtc = {};
+  tmRtc.tm_year = rtcDt.date.year - 1900;
+  tmRtc.tm_mon  = rtcDt.date.month - 1;
+  tmRtc.tm_mday = rtcDt.date.date;
+  tmRtc.tm_hour = rtcDt.time.hours;
+  tmRtc.tm_min  = rtcDt.time.minutes;
+  tmRtc.tm_sec  = rtcDt.time.seconds;
+  time_t tt = mktime(&tmRtc);
+  struct timeval tv = { tt, 0 };
+  settimeofday(&tv, nullptr);
+  rtcConfirmScreen();
+}
+
+//==============================================================================
 void Set_RTC() {
   M5.Lcd.fillScreen(WHITE);
   M5.Lcd.setCursor(0,0);
@@ -251,7 +296,7 @@ void Set_RTC() {
   while (t > time(nullptr));
   M5.Rtc.setDateTime(localtime(&t));
 
-  rtcConfirmScreen();
+  applyRtcAndConfirm();
   WiFi.disconnect(true);
 }
 //==============================================================================
@@ -383,19 +428,9 @@ void Manual_Set() {
         newdt.time.seconds= second;
         M5.Rtc.setDateTime(&newdt);
 
-        struct tm tmSet = {};
-        tmSet.tm_year = year - 1900;
-        tmSet.tm_mon  = month - 1;
-        tmSet.tm_mday = day;
-        tmSet.tm_hour = hour;
-        tmSet.tm_min  = minute;
-        tmSet.tm_sec  = second;
-        time_t tt = mktime(&tmSet);
-        struct timeval tv = { tt, 0 };
-        settimeofday(&tv, nullptr);
-
-        // Same 10-second confirmation screen as Set_RTC.
-        rtcConfirmScreen();
+        // Mirror the new RTC value into the system clock + show 10 s
+        // confirmation. Identical tail to Set_RTC and the menu timeout.
+        applyRtcAndConfirm();
         return;
       }
       if (xt >= 170 && xt <= 300 && yt >= 195 && yt <= 235) {
@@ -589,7 +624,7 @@ static void ftpHandle() {
 //==============================================================================
 
 // Data Dump mode: SoftAP + minimal FTP server.
-// Connect Wi-Fi to "M5-RAIN" (m5seismo) and open
+// Connect Wi-Fi to "M5-SEISMO" (m5seismo) and open
 // ftp://192.168.4.1 in Windows Explorer (user m5 / pass m5).
 void Data_Dump_FTP() {
   M5.Lcd.fillScreen(BLACK);
@@ -617,7 +652,7 @@ void Data_Dump_FTP() {
   WiFi.mode(WIFI_AP);
   IPAddress apIP(192, 168, 4, 1);
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-  WiFi.softAP("M5-RAIN", "m5seismo");
+  WiFi.softAP("M5-SEISMO", "m5seismo");
 
   ftpLocalIP = apIP;
   ftpCtrlSrv.begin();
@@ -625,7 +660,7 @@ void Data_Dump_FTP() {
   ftpAuthed = false;
   ftpCwd    = "/";
 
-  M5.Lcd.printf("SSID: M5-RAIN\n");
+  M5.Lcd.printf("SSID: M5-SEISMO\n");
   M5.Lcd.printf("PASS: m5seismo\n");
   M5.Lcd.println();
   M5.Lcd.printf("URL : ftp://192.168.4.1\n");
@@ -681,10 +716,18 @@ void setup() {
 
   // CSV header carrying the threshold values.
   accHeader  = "datetime";
-  accHeader += ",sum>=";  accHeader += AccThres0; accHeader += "gal,n>="; accHeader += AccThres0; accHeader += "gal";
-  accHeader += ",sum>=";  accHeader += AccThres1; accHeader += "gal,n>="; accHeader += AccThres1; accHeader += "gal";
-  accHeader += ",sum>=";  accHeader += AccThres2; accHeader += "gal,n>="; accHeader += AccThres2; accHeader += "gal";
-  accHeader += ",sum>=";  accHeader += AccThres3; accHeader += "gal,n>="; accHeader += AccThres3; accHeader += "gal";
+  // accHeader += ",sum>=";  accHeader += AccThres0; accHeader += "gal,n>="; accHeader += AccThres0; accHeader += "gal";  // sum disabled
+  // accHeader += ",sum>=";  accHeader += AccThres1; accHeader += "gal,n>="; accHeader += AccThres1; accHeader += "gal";  // sum disabled
+  // accHeader += ",sum>=";  accHeader += AccThres2; accHeader += "gal,n>="; accHeader += AccThres2; accHeader += "gal";  // sum disabled
+  // accHeader += ",sum>=";  accHeader += AccThres3; accHeader += "gal,n>="; accHeader += AccThres3; accHeader += "gal";  // sum disabled
+  accHeader += ",n100Hz>=";  accHeader += AccThres0; accHeader += "gal";
+  accHeader += ",n100Hz>=";  accHeader += AccThres1; accHeader += "gal";
+  accHeader += ",n100Hz>=";  accHeader += AccThres2; accHeader += "gal";
+  accHeader += ",n100Hz>=";  accHeader += AccThres3; accHeader += "gal";
+  accHeader += ",n4kHz>=";   accHeader += AccThres0; accHeader += "gal";
+  accHeader += ",n4kHz>=";   accHeader += AccThres1; accHeader += "gal";
+  accHeader += ",n4kHz>=";   accHeader += AccThres2; accHeader += "gal";
+  accHeader += ",n4kHz>=";   accHeader += AccThres3; accHeader += "gal";
 
   //==============================================================================
   M5.Lcd.fillScreen(WHITE);
@@ -718,11 +761,15 @@ void setup() {
   M5.Lcd.print("Tap a button:");
 
   int prevSec = -1;
+  // dispatched is hoisted out of the loop so the post-menu code can tell
+  // whether a handler ran (Wi-Fi / Reset RTC / Manual Set already sync the
+  // system clock + show rtcConfirmScreen) or the loop fell out via the 30 s
+  // timeout (which needs the catch-up call below).
+  bool dispatched = false;
   for (int i = 300; i > 0; --i) {
     M5.update();
     auto td = M5.Touch.getDetail();
     int xt = td.x, yt = td.y;
-    bool dispatched = false;
     if (td.wasPressed()) {
       for (int b = 0; b < 4; b++) {
         if (xt >= btnX && xt <= btnX + btnW &&
@@ -759,6 +806,9 @@ void setup() {
   adxl355.setHpfFrequency(HPF);
   adxl355.setSynchronization(syncTime);
   adxl355.enableMeasurement();
+  // Drain any stale samples so TaskRead starts with an empty FIFO and
+  // the per-iteration drain count reflects ODR (= 4 triplets / ms).
+  adxl355.clearFifo();
 
   // Start SD
   while (!SD.begin(GPIO_NUM_4, SPI, 10000000)) {
@@ -773,6 +823,17 @@ void setup() {
     delay(10);
     dt = M5.Rtc.getDateTime();
   }
+
+  // Timeout-path catch-up: if no menu handler ran (30 s timeout), nothing
+  // has set the system clock or shown rtcConfirmScreen yet. Mirror the RTC
+  // into the system clock and show the same 10 s confirmation screen.
+  if (!dispatched) {
+    applyRtcAndConfirm();
+  }
+
+  // Wipe the menu UI so the display stays dark until the first 5 s status
+  // panel fires from TaskSave. This matches the FIR sketch's behavior.
+  M5.Lcd.fillScreen(BLACK);
 
   // Queue holds up to 3 String pointers to absorb transient SD delays.
   xQueue = xQueueCreate(3, sizeof(String*));
@@ -810,6 +871,8 @@ void loop() {
 void TaskRead(void *pvParameters) {
   auto accelerations = adxl355.getAccelerations();
   unsigned int i = 1;
+  unsigned int slowTick = 0;       // SLOW_DIV-th iteration triggers the
+                                   // 100 Hz threshold check.
   String accData;
   accData.reserve(ACCDATA_RESERVE);
 
@@ -833,47 +896,100 @@ void TaskRead(void *pvParameters) {
     portEXIT_CRITICAL(&dtMux);
     sprintf(hhmm, "%02d:%02d", curHour, curMin);
 
-    accelerations = adxl355.getAccelerations();
+    // Drain every FIFO triplet available at this 5 ms tick (~20 triplets at
+    // ODR=4000 Hz). FIFO max is 32 triplets so 5 ms keeps comfortable
+    // margin below overflow. Each sample feeds the 4 kHz threshold count;
+    // the last drained sample (= newest) is reused for the 100 Hz
+    // threshold check on every SLOW_DIV-th iteration.
+    uint8_t fifoEntries = adxl355.getNumberOfFifoSamples();
+    uint8_t nTriplets   = fifoEntries / 3;
+    samp4kCount += nTriplets;
+    for (uint8_t k = 0; k < nTriplets; k++) {
+      accelerations = adxl355.getAccelerationsFromFifo();
+      Acc = sqrt(
+        accelerations.x * accelerations.x +
+        accelerations.y * accelerations.y +
+        accelerations.z * accelerations.z
+      );
+      // 4000 Hz threshold counts (every FIFO sample, no decimation).
+      if (Acc >= AccThres0) binary4k0 += 1;
+      if (Acc >= AccThres1) binary4k1 += 1;
+      if (Acc >= AccThres2) binary4k2 += 1;
+      if (Acc >= AccThres3) binary4k3 += 1;
+    }
+    // Note: when nTriplets == 0 (rare; only at startup) Acc retains its
+    // previous value, which is acceptable for the 100 Hz check below.
 
-    Acc = sqrt(
-      accelerations.x * accelerations.x +
-      accelerations.y * accelerations.y +
-      accelerations.z * accelerations.z
-    );
-
-    if (Acc >= AccThres0) { AccCount0 += Acc; binaryCount0 += 1; }
-    if (Acc >= AccThres1) { AccCount1 += Acc; binaryCount1 += 1; }
-    if (Acc >= AccThres2) { AccCount2 += Acc; binaryCount2 += 1; }
-    if (Acc >= AccThres3) { AccCount3 += Acc; binaryCount3 += 1; }
-
-    Serial.print(AccCount0);
-    Serial.print(", ");
-    Serial.println(binaryCount0);
+    // 100 Hz threshold counts (every SLOW_DIV-th iteration; decimated, no LPF).
+    slowTick++;
+    if (slowTick >= SLOW_DIV) {
+      slowTick = 0;
+      if (Acc >= AccThres0) { /* AccCount0 += Acc; */ binaryCount0 += 1; }  // sum disabled
+      if (Acc >= AccThres1) { /* AccCount1 += Acc; */ binaryCount1 += 1; }  // sum disabled
+      if (Acc >= AccThres2) { /* AccCount2 += Acc; */ binaryCount2 += 1; }  // sum disabled
+      if (Acc >= AccThres3) { /* AccCount3 += Acc; */ binaryCount3 += 1; }  // sum disabled
+      // Serial.print(AccCount0); Serial.print(", ");  // sum disabled
+      Serial.println(binaryCount0);
+    }
 
     if (i >= hz * SDWriteTime) {
       accData += '\n';
       accData += yyyymmdd;
       accData += ' ';
       accData += hhmm;
+      // 100 Hz exceed counts
       accData += ',';
-      accData += AccCount0;  accData += ','; accData += binaryCount0;
+      // accData += AccCount0;  accData += ',';  // sum disabled
+      accData += binaryCount0;
       accData += ',';
-      accData += AccCount1;  accData += ','; accData += binaryCount1;
+      // accData += AccCount1;  accData += ',';  // sum disabled
+      accData += binaryCount1;
       accData += ',';
-      accData += AccCount2;  accData += ','; accData += binaryCount2;
+      // accData += AccCount2;  accData += ',';  // sum disabled
+      accData += binaryCount2;
       accData += ',';
-      accData += AccCount3;  accData += ','; accData += binaryCount3;
+      // accData += AccCount3;  accData += ',';  // sum disabled
+      accData += binaryCount3;
+      // 4000 Hz exceed counts
+      accData += ',';
+      accData += binary4k0;
+      accData += ',';
+      accData += binary4k1;
+      accData += ',';
+      accData += binary4k2;
+      accData += ',';
+      accData += binary4k3;
 
+      // Publish the just-completed minute's counters for TaskSave's display
+      // BEFORE pushing to the queue, so TaskSave is guaranteed to see the
+      // matching snapshot when it wakes from xQueueReceive().
+      portENTER_CRITICAL(&dispMux);
+      // dispSum0 = AccCount0;  // sum disabled
+      dispBin0 = (uint32_t)binaryCount0;
+      disp4k0  = (uint32_t)binary4k0;
+      // dispSum1 = AccCount1;  // sum disabled
+      dispBin1 = (uint32_t)binaryCount1;
+      disp4k1  = (uint32_t)binary4k1;
+      // dispSum2 = AccCount2;  // sum disabled
+      dispBin2 = (uint32_t)binaryCount2;
+      disp4k2  = (uint32_t)binary4k2;
+      // dispSum3 = AccCount3;  // sum disabled
+      dispBin3 = (uint32_t)binaryCount3;
+      disp4k3  = (uint32_t)binary4k3;
+      dispSamp4k = samp4kCount;
+      portEXIT_CRITICAL(&dispMux);
       String *snapshot = new String(accData);
       if (xQueueSendToBack(xQueue, &snapshot, 0) != pdTRUE) {
         delete snapshot;
         dropCount = dropCount + 1;
       }
       accData = "";
-      AccCount0 = 0.; binaryCount0 = 0;
-      AccCount1 = 0.; binaryCount1 = 0;
-      AccCount2 = 0.; binaryCount2 = 0;
-      AccCount3 = 0.; binaryCount3 = 0;
+      /* AccCount0 = 0.; */ binaryCount0 = 0; binary4k0 = 0;  // sum disabled
+      /* AccCount1 = 0.; */ binaryCount1 = 0; binary4k1 = 0;  // sum disabled
+      /* AccCount2 = 0.; */ binaryCount2 = 0; binary4k2 = 0;  // sum disabled
+      /* AccCount3 = 0.; */ binaryCount3 = 0; binary4k3 = 0;  // sum disabled
+      samp4kCount = 0;
+      slowTick = 0;
 
       i = 1;
     }
@@ -890,10 +1006,6 @@ void TaskSave(void *pvParameters) {
   bool firstBatch = true;
 
   delay(5);
-
-  char prevTime[32] = "";
-  uint32_t prevOk = 0xFFFFFFFFu;
-  uint32_t prevDrop = 0xFFFFFFFFu;
 
   for (;;) {
     // Check xQueueReceive return; skip write on timeout.
@@ -926,34 +1038,62 @@ void TaskSave(void *pvParameters) {
     dt = localDt;
     portEXIT_CRITICAL(&dtMux);
 
-    char nowStr[32];
-    sprintf(nowStr, "%04d/%02d/%02d %02d:%02d:%02d",
-            localDt.date.year, localDt.date.month, localDt.date.date,
-            localDt.time.hours, localDt.time.minutes, localDt.time.seconds);
+    // Snapshot the last minute's threshold counters (published by TaskRead
+    // just before it reset them).
+    // double   s0, s1, s2, s3;  // sum disabled
+    uint32_t b0, b1, b2, b3;          // 100 Hz exceed counts
+    uint32_t g0, g1, g2, g3;          // 4000 Hz exceed counts
+    uint32_t samp4k;                  // total drained samples
+    portENTER_CRITICAL(&dispMux);
+    /* s0 = dispSum0; */ b0 = dispBin0; g0 = disp4k0;
+    /* s1 = dispSum1; */ b1 = dispBin1; g1 = disp4k1;
+    /* s2 = dispSum2; */ b2 = dispBin2; g2 = disp4k2;
+    /* s3 = dispSum3; */ b3 = dispBin3; g3 = disp4k3;
+    samp4k = dispSamp4k;
+    portEXIT_CRITICAL(&dispMux);
+
+    // Light up the screen for ~5 s with the just-completed minute summary,
+    // then go dark until the next batch arrives (~55 s later).
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setTextColor(WHITE, BLACK);
 
     M5.Lcd.setTextFont(4);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.printf("%04d/%02d/%02d %02d:%02d",
+                  localDt.date.year, localDt.date.month, localDt.date.date,
+                  localDt.time.hours, localDt.time.minutes);
+
+    M5.Lcd.setTextFont(2);
+    M5.Lcd.setCursor(0, 40);
+    M5.Lcd.printf("           100Hz    4kHz");
+    M5.Lcd.setCursor(0, 60);
+    M5.Lcd.printf(">=%2.0f gal   %5lu  %6lu",
+                  AccThres0, (unsigned long)b0, (unsigned long)g0);
+    M5.Lcd.setCursor(0, 80);
+    M5.Lcd.printf(">=%2.0f gal   %5lu  %6lu",
+                  AccThres1, (unsigned long)b1, (unsigned long)g1);
+    M5.Lcd.setCursor(0, 100);
+    M5.Lcd.printf(">=%2.0f gal   %5lu  %6lu",
+                  AccThres2, (unsigned long)b2, (unsigned long)g2);
+    M5.Lcd.setCursor(0, 120);
+    M5.Lcd.printf(">=%2.0f gal   %5lu  %6lu",
+                  AccThres3, (unsigned long)b3, (unsigned long)g3);
+
+    M5.Lcd.setCursor(0, 150);
+    M5.Lcd.printf("OK  : %lu", (unsigned long)batchOkCount);
+    // DROP = number of dropped batches (queue full from slow SD writes).
+    M5.Lcd.setCursor(0, 170);
+    M5.Lcd.setTextColor(dropCount ? RED : WHITE, BLACK);
+    M5.Lcd.printf("DROP: %lu", (unsigned long)dropCount);
     M5.Lcd.setTextColor(WHITE, BLACK);
-    if (strcmp(nowStr, prevTime) != 0) {
-      M5.Lcd.fillRect(0, 0, 320, 30, BLACK);
-      M5.Lcd.setCursor(0, 0);
-      M5.Lcd.print(nowStr);
-      strcpy(prevTime, nowStr);
-    }
-    if (batchOkCount != prevOk) {
-      M5.Lcd.fillRect(0, 40, 320, 30, BLACK);
-      M5.Lcd.setCursor(0, 40);
-      M5.Lcd.printf("OK : %lu", (unsigned long)batchOkCount);
-      prevOk = batchOkCount;
-    }
-    if (dropCount != prevDrop) {
-      // DROP = number of dropped batches (queue full from slow SD writes).
-      M5.Lcd.fillRect(0, 70, 320, 30, BLACK);
-      M5.Lcd.setTextColor(dropCount ? RED : WHITE, BLACK);
-      M5.Lcd.setCursor(0, 70);
-      M5.Lcd.printf("DROP: %lu", (unsigned long)dropCount);
-      M5.Lcd.setTextColor(WHITE, BLACK);
-      prevDrop = dropCount;
-    }
+    // N4k = total FIFO triplets drained in the just-completed minute.
+    // Expected ~= 240000 (= ODR 4000 * 60 s); short-fall flags FIFO
+    // overflow or scheduler slip.
+    M5.Lcd.setCursor(0, 190);
+    M5.Lcd.printf("N4k : %lu", (unsigned long)samp4k);
+
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
+    M5.Lcd.fillScreen(BLACK);
 
     delete recData;
     recData = nullptr;
