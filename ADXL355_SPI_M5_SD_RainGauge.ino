@@ -1161,7 +1161,7 @@ void TaskSave(void *pvParameters) {
 
     vTaskDelay(5000 / portTICK_PERIOD_MS);
     M5.Lcd.fillScreen(BLACK);
-    M5.Lcd.setBrightness(0);
+    M5.Lcd.setBrightness(0); // end
 
     delete recData;
     recData = nullptr;
