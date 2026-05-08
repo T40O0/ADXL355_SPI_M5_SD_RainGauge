@@ -807,7 +807,7 @@ void setup() {
   adxl355.setSynchronization(syncTime);
   adxl355.enableMeasurement();
   // Drain any stale samples so TaskRead starts with an empty FIFO and
-  // the per-iteration drain count reflects ODR (= 4 triplets / ms).
+  // the per-iteration drain count reflects ODR.
   adxl355.clearFifo();
 
   // Start SD
@@ -824,15 +824,10 @@ void setup() {
     dt = M5.Rtc.getDateTime();
   }
 
-  // Timeout-path catch-up: if no menu handler ran (30 s timeout), nothing
-  // has set the system clock or shown rtcConfirmScreen yet. Mirror the RTC
-  // into the system clock and show the same 10 s confirmation screen.
   if (!dispatched) {
     applyRtcAndConfirm();
   }
 
-  // Wipe the menu UI so the display stays dark until the first 5 s status
-  // panel fires from TaskSave. This matches the FIR sketch's behavior.
   M5.Lcd.fillScreen(BLACK);
 
   // Queue holds up to 3 String pointers to absorb transient SD delays.
@@ -871,8 +866,7 @@ void loop() {
 void TaskRead(void *pvParameters) {
   auto accelerations = adxl355.getAccelerations();
   unsigned int i = 1;
-  unsigned int slowTick = 0;       // SLOW_DIV-th iteration triggers the
-                                   // 100 Hz threshold check.
+  unsigned int slowTick = 0;       // 100 Hz tick: fires every SLOW_DIV iterations.
   String accData;
   accData.reserve(ACCDATA_RESERVE);
 
@@ -960,9 +954,6 @@ void TaskRead(void *pvParameters) {
       accData += ',';
       accData += binary4k3;
 
-      // Publish the just-completed minute's counters for TaskSave's display
-      // BEFORE pushing to the queue, so TaskSave is guaranteed to see the
-      // matching snapshot when it wakes from xQueueReceive().
       portENTER_CRITICAL(&dispMux);
       // dispSum0 = AccCount0;  // sum disabled
       dispBin0 = (uint32_t)binaryCount0;

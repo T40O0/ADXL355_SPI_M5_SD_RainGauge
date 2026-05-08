@@ -12,8 +12,8 @@ Hats off to PL.
 ## Features
  - Cost-effective: It can be built for around €100.
  - Tracking: counts samples exceeding four preset thresholds (5 / 10 / 20 / 30 gal) at two rates per minute:
-   - **100 Hz**: decimated 1-of-10 from the 1 ms outer loop (kept for backward compatibility with the empirical rainfall formula below).
-   - **4 kHz**: every ADXL355 sample, drained from the on-chip FIFO each iteration. Captures sub-millisecond raindrop impulses that 100 Hz subsampling misses.
+   - **100 Hz**: decimated 1-of-2 from the 5 ms (200 Hz) outer loop (kept for backward compatibility with the empirical rainfall formula below).
+   - **4 kHz**: every ADXL355 sample, drained from the on-chip FIFO each 5 ms outer-loop iteration (~20 triplets per drain, well below the 32-triplet FIFO limit so no samples are lost). Captures sub-millisecond raindrop impulses that 100 Hz subsampling misses.
  - Rainfall conversion: multiplies the per-minute 100 Hz exceedance frequency by an empirical coefficient to estimate rainfall in mm.
  - Local storage: saves a single CSV per day on a TF (microSD) card (`/YYYYMMDD.csv`), one row per minute, 9 columns (`datetime` + 4 thresholds × 2 rates).
  - Dual-core FreeRTOS pipeline (TaskRead on PRO_CPU, TaskSave on APP_CPU) decouples sampling from SD I/O.
@@ -40,7 +40,7 @@ After any of the above (or after the 30 second timeout), measurement begins at t
    - 5 gal exceedance frequency × 0.0002281 (mm)
    - 10 gal exceedance frequency × 0.0004399 (mm)
  - Data are recorded one row per minute. Rows can be aggregated to estimate rainfall every 10 minutes, hourly, etc.
- - **Sampling**: ADXL355 ODR=4000 Hz, internal LPF -3 dB @ 1000 Hz. Each 1 ms of the read task drains the on-chip FIFO (~4 triplets) - every sample feeds the 4 kHz exceedance count, while only the last drained sample of each 10 ms slice feeds the 100 Hz count (decimation, no anti-alias filter). Both counts are written every minute.
+ - **Sampling**: ADXL355 ODR=4000 Hz, internal LPF -3 dB @ 1000 Hz. The read task wakes every 5 ms (200 Hz outer loop) and drains the on-chip FIFO (~20 triplets per wake). Every drained sample feeds the 4 kHz exceedance count; on every other wake the last drained sample also feeds the 100 Hz count (decimation, no anti-alias filter). Both counts are written every minute.
  - Why two rates: the 100 Hz column is kept so existing rainfall coefficients still apply. The 4 kHz column captures short impulses (sub-millisecond raindrop strikes) that 100 Hz subsampling can miss. Comparing 4 kHz vs 100 Hz (theoretical ratio 40) hints at how impulse-rich the signal is.
  - Aliasing is allowed by design - only threshold counts matter, not spectra. For frequency analysis, see the [MEMS Seismometer](https://github.com/T40O0/ADXL355_SPI_M5_SD_FIR) instead.
  - **CSV format**: `datetime, n100Hz>=5gal, n100Hz>=10gal, n100Hz>=20gal, n100Hz>=30gal, n4kHz>=5gal, n4kHz>=10gal, n4kHz>=20gal, n4kHz>=30gal`.
