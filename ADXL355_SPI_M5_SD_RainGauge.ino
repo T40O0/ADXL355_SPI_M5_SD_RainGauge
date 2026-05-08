@@ -393,6 +393,20 @@ void Manual_Set() {
     }
   };
 
+  // Partial redraw of one digit cell only (avoids fillScreen flicker
+  // during long-press auto-repeat).
+  auto drawValue = [&](int idx){
+    M5.Lcd.fillRect(xs[idx], 75, colW[idx], 40, WHITE);
+    M5.Lcd.setTextFont(4);
+    M5.Lcd.setTextColor(BLACK, WHITE);
+    M5.Lcd.setCursor(xs[idx] + 2, 80);
+    char buf[8];
+    int vals[6] = {year, month, day, hour, minute, second};
+    if (idx == 0) sprintf(buf, "%04d", vals[idx]);
+    else          sprintf(buf, "%02d", vals[idx]);
+    M5.Lcd.print(buf);
+  };
+
   drawAll();
 
   // Long-press auto-repeat: HOLD_DELAY -> REPEAT_SLOW -> REPEAT_FAST after ACCEL_AFTER.
@@ -419,7 +433,7 @@ void Manual_Set() {
       for (int i = 0; i < 6 && !handled; i++) {
         if (xt >= xs[i] && xt <= xs[i] + colW[i] &&
             yt >= upY  && yt <= upY  + btnH) {
-          adjust(i, +1); drawAll();
+          adjust(i, +1); drawValue(i);
           holdBtn = i; holdDelta = +1; holdRow = upY;
           holdStart = lastRepeat = now;
           handled = true;
@@ -428,7 +442,7 @@ void Manual_Set() {
       for (int i = 0; i < 6 && !handled; i++) {
         if (xt >= xs[i] && xt <= xs[i] + colW[i] &&
             yt >= dnY  && yt <= dnY  + btnH) {
-          adjust(i, -1); drawAll();
+          adjust(i, -1); drawValue(i);
           holdBtn = i; holdDelta = -1; holdRow = dnY;
           holdStart = lastRepeat = now;
           handled = true;
@@ -476,7 +490,7 @@ void Manual_Set() {
             uint32_t interval = (held >= ACCEL_AFTER_MS) ? REPEAT_FAST_MS
                                                          : REPEAT_SLOW_MS;
             if (now - lastRepeat >= interval) {
-              adjust(holdBtn, holdDelta); drawAll();
+              adjust(holdBtn, holdDelta); drawValue(holdBtn);
               lastRepeat = now;
             }
           }
@@ -1106,7 +1120,9 @@ void TaskSave(void *pvParameters) {
     samp4k = dispSamp4k;
     portEXIT_CRITICAL(&dispMux);
 
-    // 5 s status panel, then dark until the next batch.
+    // 5 s status panel (backlight ON), then ~55 s with backlight OFF
+    // until the next batch (saves ~92% of LCD power vs always-on).
+    M5.Lcd.setBrightness(100);
     M5.Lcd.fillScreen(BLACK);
     M5.Lcd.setTextColor(WHITE, BLACK);
 
@@ -1145,6 +1161,7 @@ void TaskSave(void *pvParameters) {
 
     vTaskDelay(5000 / portTICK_PERIOD_MS);
     M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setBrightness(0);
 
     delete recData;
     recData = nullptr;
