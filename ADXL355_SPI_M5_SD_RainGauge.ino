@@ -33,10 +33,12 @@
 #endif
 //==============================================================================
 
-// Outer loop runs at 200 Hz (5 ms period). At ODR=4000 Hz the ADXL355 FIFO
-// (32 triplets max) fills in 8 ms, so a 5 ms drain interval keeps it well
-// below the overflow threshold while halving the wakeup count vs a 1000 Hz
-// loop. SLOW_DIV gates the 100 Hz threshold tick to every 2nd iteration.
+// Outer loop runs at 200 Hz (5 ms period). Each iteration drains ~20 FIFO
+// triplets (ODR=4000 Hz, FIFO max 32 triplets so 5 ms keeps comfortable
+// margin). The 1 kHz threshold tick is driven inside the FIFO drain loop
+// (every 4th FIFO sample, ADXL-clock-aligned), so it is independent of the
+// outer-loop rate. SLOW_DIV gates the 100 Hz threshold tick to every 2nd
+// outer iteration on the last drained sample.
 unsigned int hz = 200;
 const unsigned int SLOW_DIV = 2;   // 200 / 100
 unsigned int dtWrite = 1000 / hz;
@@ -60,18 +62,22 @@ uint32_t samp4kCount = 0;
 double AccThres0 = 5.;
 // double AccCount0 = 0.;  // sum disabled
 int binaryCount0 = 0;     // 100 Hz exceed count (decimated last_Acc, no LPF)
+int binary1k0     = 0;    // 1000 Hz exceed count (every 4th FIFO sample)
 int binary4k0     = 0;    // 4000 Hz exceed count (every FIFO sample, sensor LPF only)
 double AccThres1 = 10.0;
 // double AccCount1 = 0.;  // sum disabled
 int binaryCount1 = 0;
+int binary1k1     = 0;
 int binary4k1     = 0;
 double AccThres2 = 20.0;
 // double AccCount2 = 0.;  // sum disabled
 int binaryCount2 = 0;
+int binary1k2     = 0;
 int binary4k2     = 0;
 double AccThres3 = 30.;
 // double AccCount3 = 0.;  // sum disabled
 int binaryCount3 = 0;
+int binary1k3     = 0;
 int binary4k3     = 0;
 
 // CSV header carrying the threshold values for each column.
@@ -89,6 +95,7 @@ volatile uint32_t batchOkCount = 0;
 // the snapshot to draw the 5-second status panel each minute.
 // double   dispSum0 = 0., dispSum1 = 0., dispSum2 = 0., dispSum3 = 0.;  // sum disabled
 uint32_t dispBin0 = 0,  dispBin1 = 0,  dispBin2 = 0,  dispBin3 = 0;   // 100 Hz
+uint32_t disp1k0  = 0,  disp1k1  = 0,  disp1k2  = 0,  disp1k3  = 0;   // 1000 Hz
 uint32_t disp4k0  = 0,  disp4k1  = 0,  disp4k2  = 0,  disp4k3  = 0;   // 4000 Hz
 uint32_t dispSamp4k = 0;                                              // total drained samples
 portMUX_TYPE dispMux = portMUX_INITIALIZER_UNLOCKED;
@@ -426,6 +433,16 @@ void Manual_Set() {
         newdt.time.hours  = hour;
         newdt.time.minutes= minute;
         newdt.time.seconds= second;
+        // PCF8563-class RTCs store weekday in a separate register and do
+        // NOT derive it from the date. If we leave it untouched, RTC display
+        // shows the previous (wrong) weekday until next NTP sync. Compute
+        // it from the date with Sakamoto's method (0=Sun..6=Sat).
+        {
+          static const int sakamoto_t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+          int yy = year - (month < 3 ? 1 : 0);
+          newdt.date.weekDay = (yy + yy/4 - yy/100 + yy/400
+                                + sakamoto_t[month - 1] + day) % 7;
+        }
         M5.Rtc.setDateTime(&newdt);
 
         // Mirror the new RTC value into the system clock + show 10 s
@@ -724,6 +741,10 @@ void setup() {
   accHeader += ",n100Hz>=";  accHeader += AccThres1; accHeader += "gal";
   accHeader += ",n100Hz>=";  accHeader += AccThres2; accHeader += "gal";
   accHeader += ",n100Hz>=";  accHeader += AccThres3; accHeader += "gal";
+  accHeader += ",n1kHz>=";   accHeader += AccThres0; accHeader += "gal";
+  accHeader += ",n1kHz>=";   accHeader += AccThres1; accHeader += "gal";
+  accHeader += ",n1kHz>=";   accHeader += AccThres2; accHeader += "gal";
+  accHeader += ",n1kHz>=";   accHeader += AccThres3; accHeader += "gal";
   accHeader += ",n4kHz>=";   accHeader += AccThres0; accHeader += "gal";
   accHeader += ",n4kHz>=";   accHeader += AccThres1; accHeader += "gal";
   accHeader += ",n4kHz>=";   accHeader += AccThres2; accHeader += "gal";
@@ -866,7 +887,8 @@ void loop() {
 void TaskRead(void *pvParameters) {
   auto accelerations = adxl355.getAccelerations();
   unsigned int i = 1;
-  unsigned int slowTick = 0;       // 100 Hz tick: fires every SLOW_DIV iterations.
+  unsigned int slowTick = 0;       // 100 Hz tick: fires every SLOW_DIV outer iterations.
+  unsigned int oneKTick = 0;       // 1 kHz tick: fires every 4th FIFO sample (4 kHz / 4).
   String accData;
   accData.reserve(ACCDATA_RESERVE);
 
@@ -891,10 +913,10 @@ void TaskRead(void *pvParameters) {
     sprintf(hhmm, "%02d:%02d", curHour, curMin);
 
     // Drain every FIFO triplet available at this 5 ms tick (~20 triplets at
-    // ODR=4000 Hz). FIFO max is 32 triplets so 5 ms keeps comfortable
-    // margin below overflow. Each sample feeds the 4 kHz threshold count;
-    // the last drained sample (= newest) is reused for the 100 Hz
-    // threshold check on every SLOW_DIV-th iteration.
+    // ODR=4000 Hz). Each sample feeds the 4 kHz threshold count; every 4th
+    // sample also feeds the 1 kHz threshold count. The last drained sample
+    // (= newest) is reused for the 100 Hz threshold check on every
+    // SLOW_DIV-th outer iteration.
     uint8_t fifoEntries = adxl355.getNumberOfFifoSamples();
     uint8_t nTriplets   = fifoEntries / 3;
     samp4kCount += nTriplets;
@@ -910,11 +932,21 @@ void TaskRead(void *pvParameters) {
       if (Acc >= AccThres1) binary4k1 += 1;
       if (Acc >= AccThres2) binary4k2 += 1;
       if (Acc >= AccThres3) binary4k3 += 1;
+      // 1000 Hz threshold counts (every 4th FIFO sample = 4 kHz / 4).
+      oneKTick++;
+      if (oneKTick >= 4) {
+        oneKTick = 0;
+        if (Acc >= AccThres0) binary1k0 += 1;
+        if (Acc >= AccThres1) binary1k1 += 1;
+        if (Acc >= AccThres2) binary1k2 += 1;
+        if (Acc >= AccThres3) binary1k3 += 1;
+      }
     }
     // Note: when nTriplets == 0 (rare; only at startup) Acc retains its
     // previous value, which is acceptable for the 100 Hz check below.
 
-    // 100 Hz threshold counts (every SLOW_DIV-th iteration; decimated, no LPF).
+    // 100 Hz threshold counts (every SLOW_DIV-th outer iteration on last_Acc;
+    // ESP32-clock-aligned, decimated, no LPF).
     slowTick++;
     if (slowTick >= SLOW_DIV) {
       slowTick = 0;
@@ -944,6 +976,15 @@ void TaskRead(void *pvParameters) {
       accData += ',';
       // accData += AccCount3;  accData += ',';  // sum disabled
       accData += binaryCount3;
+      // 1000 Hz exceed counts
+      accData += ',';
+      accData += binary1k0;
+      accData += ',';
+      accData += binary1k1;
+      accData += ',';
+      accData += binary1k2;
+      accData += ',';
+      accData += binary1k3;
       // 4000 Hz exceed counts
       accData += ',';
       accData += binary4k0;
@@ -957,15 +998,19 @@ void TaskRead(void *pvParameters) {
       portENTER_CRITICAL(&dispMux);
       // dispSum0 = AccCount0;  // sum disabled
       dispBin0 = (uint32_t)binaryCount0;
+      disp1k0  = (uint32_t)binary1k0;
       disp4k0  = (uint32_t)binary4k0;
       // dispSum1 = AccCount1;  // sum disabled
       dispBin1 = (uint32_t)binaryCount1;
+      disp1k1  = (uint32_t)binary1k1;
       disp4k1  = (uint32_t)binary4k1;
       // dispSum2 = AccCount2;  // sum disabled
       dispBin2 = (uint32_t)binaryCount2;
+      disp1k2  = (uint32_t)binary1k2;
       disp4k2  = (uint32_t)binary4k2;
       // dispSum3 = AccCount3;  // sum disabled
       dispBin3 = (uint32_t)binaryCount3;
+      disp1k3  = (uint32_t)binary1k3;
       disp4k3  = (uint32_t)binary4k3;
       dispSamp4k = samp4kCount;
       portEXIT_CRITICAL(&dispMux);
@@ -975,12 +1020,13 @@ void TaskRead(void *pvParameters) {
         dropCount = dropCount + 1;
       }
       accData = "";
-      /* AccCount0 = 0.; */ binaryCount0 = 0; binary4k0 = 0;  // sum disabled
-      /* AccCount1 = 0.; */ binaryCount1 = 0; binary4k1 = 0;  // sum disabled
-      /* AccCount2 = 0.; */ binaryCount2 = 0; binary4k2 = 0;  // sum disabled
-      /* AccCount3 = 0.; */ binaryCount3 = 0; binary4k3 = 0;  // sum disabled
+      /* AccCount0 = 0.; */ binaryCount0 = 0; binary1k0 = 0; binary4k0 = 0;  // sum disabled
+      /* AccCount1 = 0.; */ binaryCount1 = 0; binary1k1 = 0; binary4k1 = 0;  // sum disabled
+      /* AccCount2 = 0.; */ binaryCount2 = 0; binary1k2 = 0; binary4k2 = 0;  // sum disabled
+      /* AccCount3 = 0.; */ binaryCount3 = 0; binary1k3 = 0; binary4k3 = 0;  // sum disabled
       samp4kCount = 0;
       slowTick = 0;
+      oneKTick = 0;
 
       i = 1;
     }
@@ -1033,13 +1079,14 @@ void TaskSave(void *pvParameters) {
     // just before it reset them).
     // double   s0, s1, s2, s3;  // sum disabled
     uint32_t b0, b1, b2, b3;          // 100 Hz exceed counts
+    uint32_t f0, f1, f2, f3;          // 1000 Hz exceed counts
     uint32_t g0, g1, g2, g3;          // 4000 Hz exceed counts
     uint32_t samp4k;                  // total drained samples
     portENTER_CRITICAL(&dispMux);
-    /* s0 = dispSum0; */ b0 = dispBin0; g0 = disp4k0;
-    /* s1 = dispSum1; */ b1 = dispBin1; g1 = disp4k1;
-    /* s2 = dispSum2; */ b2 = dispBin2; g2 = disp4k2;
-    /* s3 = dispSum3; */ b3 = dispBin3; g3 = disp4k3;
+    /* s0 = dispSum0; */ b0 = dispBin0; f0 = disp1k0; g0 = disp4k0;
+    /* s1 = dispSum1; */ b1 = dispBin1; f1 = disp1k1; g1 = disp4k1;
+    /* s2 = dispSum2; */ b2 = dispBin2; f2 = disp1k2; g2 = disp4k2;
+    /* s3 = dispSum3; */ b3 = dispBin3; f3 = disp1k3; g3 = disp4k3;
     samp4k = dispSamp4k;
     portEXIT_CRITICAL(&dispMux);
 
@@ -1056,19 +1103,19 @@ void TaskSave(void *pvParameters) {
 
     M5.Lcd.setTextFont(2);
     M5.Lcd.setCursor(0, 40);
-    M5.Lcd.printf("           100Hz    4kHz");
+    M5.Lcd.printf("         100Hz  1kHz   4kHz");
     M5.Lcd.setCursor(0, 60);
-    M5.Lcd.printf(">=%2.0f gal   %5lu  %6lu",
-                  AccThres0, (unsigned long)b0, (unsigned long)g0);
+    M5.Lcd.printf(">=%2.0f gal  %5lu %5lu  %6lu",
+                  AccThres0, (unsigned long)b0, (unsigned long)f0, (unsigned long)g0);
     M5.Lcd.setCursor(0, 80);
-    M5.Lcd.printf(">=%2.0f gal   %5lu  %6lu",
-                  AccThres1, (unsigned long)b1, (unsigned long)g1);
+    M5.Lcd.printf(">=%2.0f gal  %5lu %5lu  %6lu",
+                  AccThres1, (unsigned long)b1, (unsigned long)f1, (unsigned long)g1);
     M5.Lcd.setCursor(0, 100);
-    M5.Lcd.printf(">=%2.0f gal   %5lu  %6lu",
-                  AccThres2, (unsigned long)b2, (unsigned long)g2);
+    M5.Lcd.printf(">=%2.0f gal  %5lu %5lu  %6lu",
+                  AccThres2, (unsigned long)b2, (unsigned long)f2, (unsigned long)g2);
     M5.Lcd.setCursor(0, 120);
-    M5.Lcd.printf(">=%2.0f gal   %5lu  %6lu",
-                  AccThres3, (unsigned long)b3, (unsigned long)g3);
+    M5.Lcd.printf(">=%2.0f gal  %5lu %5lu  %6lu",
+                  AccThres3, (unsigned long)b3, (unsigned long)f3, (unsigned long)g3);
 
     M5.Lcd.setCursor(0, 150);
     M5.Lcd.printf("OK  : %lu", (unsigned long)batchOkCount);

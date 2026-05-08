@@ -11,11 +11,12 @@ Hats off to PL.
 
 ## Features
  - Cost-effective: It can be built for around €100.
- - Tracking: counts samples exceeding four preset thresholds (5 / 10 / 20 / 30 gal) at two rates per minute:
-   - **100 Hz**: decimated 1-of-2 from the 5 ms (200 Hz) outer loop (kept for backward compatibility with the empirical rainfall formula below).
-   - **4 kHz**: every ADXL355 sample, drained from the on-chip FIFO each 5 ms outer-loop iteration (~20 triplets per drain, well below the 32-triplet FIFO limit so no samples are lost). Captures sub-millisecond raindrop impulses that 100 Hz subsampling misses.
+ - Tracking: counts samples exceeding four preset thresholds (5 / 10 / 20 / 30 gal) at three rates per minute:
+   - **100 Hz**: decimated 1-of-2 from the 5 ms (200 Hz) outer loop on the last drained FIFO sample (ESP32-clock-aligned, kept for backward compatibility with the empirical rainfall formula below).
+   - **1 kHz**: every 4th FIFO sample inside the drain loop (ADXL-clock-aligned). Natural disdrometer rate where each ~5 ms raindrop impulse contributes ~5 counts.
+   - **4 kHz**: every ADXL355 sample, drained from the on-chip FIFO each 5 ms outer-loop iteration (~20 triplets per drain, well below the 32-triplet FIFO limit so no samples are lost). Captures sub-millisecond raindrop impulses that lower-rate subsampling may miss.
  - Rainfall conversion: multiplies the per-minute 100 Hz exceedance frequency by an empirical coefficient to estimate rainfall in mm.
- - Local storage: saves a single CSV per day on a TF (microSD) card (`/YYYYMMDD.csv`), one row per minute, 9 columns (`datetime` + 4 thresholds × 2 rates).
+ - Local storage: saves a single CSV per day on a TF (microSD) card (`/YYYYMMDD.csv`), one row per minute, 13 columns (`datetime` + 4 thresholds × 3 rates).
  - Dual-core FreeRTOS pipeline (TaskRead on PRO_CPU, TaskSave on APP_CPU) decouples sampling from SD I/O.
  - Per-minute LCD status panel (5 s on, ~55 s off) showing date/time, both count rates per threshold, OK/DROP, and an `N4k` diagnostic (~240000 expected per minute = ODR 4000 × 60 s).
  - Built-in Wi-Fi AP + FTP server for data retrieval (no SD card removal required).
@@ -40,10 +41,10 @@ After any of the above (or after the 30 second timeout), measurement begins at t
    - 5 gal exceedance frequency × 0.0002281 (mm)
    - 10 gal exceedance frequency × 0.0004399 (mm)
  - Data are recorded one row per minute. Rows can be aggregated to estimate rainfall every 10 minutes, hourly, etc.
- - **Sampling**: ADXL355 ODR=4000 Hz, internal LPF -3 dB @ 1000 Hz. The read task wakes every 5 ms (200 Hz outer loop) and drains the on-chip FIFO (~20 triplets per wake). Every drained sample feeds the 4 kHz exceedance count; on every other wake the last drained sample also feeds the 100 Hz count (decimation, no anti-alias filter). Both counts are written every minute.
- - Why two rates: the 100 Hz column is kept so existing rainfall coefficients still apply. The 4 kHz column captures short impulses (sub-millisecond raindrop strikes) that 100 Hz subsampling can miss. Comparing 4 kHz vs 100 Hz (theoretical ratio 40) hints at how impulse-rich the signal is.
+ - **Sampling**: ADXL355 ODR=4000 Hz, internal LPF -3 dB @ 1000 Hz. The read task wakes every 5 ms (200 Hz outer loop) and drains the on-chip FIFO (~20 triplets per wake). Inside the drain loop, every sample feeds the 4 kHz exceedance count and every 4th sample feeds the 1 kHz count (both ADXL-clock-aligned). After the drain, the last drained sample feeds the 100 Hz count every 2nd outer iteration (ESP32-clock-aligned). All three are decimations (no anti-alias filter beyond the sensor's built-in LPF) and written every minute.
+ - Why three rates: the 100 Hz column is kept so existing rainfall coefficients still apply. The 1 kHz column gives a natural "one count per raindrop scale" (each ~5 ms impulse contributes ~5 counts). The 4 kHz column captures sub-millisecond impulses that 1 kHz subsampling may miss. Theoretical ratios are 4 : 10 : 40 (4kHz : 1kHz : 100Hz scaled to a common base).
  - Aliasing is allowed by design - only threshold counts matter, not spectra. For frequency analysis, see the [MEMS Seismometer](https://github.com/T40O0/ADXL355_SPI_M5_SD_FIR) instead.
- - **CSV format**: `datetime, n100Hz>=5gal, n100Hz>=10gal, n100Hz>=20gal, n100Hz>=30gal, n4kHz>=5gal, n4kHz>=10gal, n4kHz>=20gal, n4kHz>=30gal`.
+ - **CSV format**: `datetime, n100Hz>=5gal, n100Hz>=10gal, n100Hz>=20gal, n100Hz>=30gal, n1kHz>=5gal, n1kHz>=10gal, n1kHz>=20gal, n1kHz>=30gal, n4kHz>=5gal, n4kHz>=10gal, n4kHz>=20gal, n4kHz>=30gal`.
  - **RTC year range**: measurements only start when the RTC year is in 2026..2099. Edit `setup()` if needed.
  - **NTP setup**: edit the defines near the top of the sketch to fit your environment.  
    `#define NTP_TIMEZONE  "your zone"`  
