@@ -33,12 +33,9 @@
 #endif
 //==============================================================================
 
-// Outer loop runs at 200 Hz (5 ms period). Each iteration drains ~20 FIFO
-// triplets (ODR=4000 Hz, FIFO max 32 triplets so 5 ms keeps comfortable
-// margin). The 1 kHz threshold tick is driven inside the FIFO drain loop
-// (every 4th FIFO sample, ADXL-clock-aligned), so it is independent of the
-// outer-loop rate. SLOW_DIV gates the 100 Hz threshold tick to every 2nd
-// outer iteration on the last drained sample.
+// Outer loop 200 Hz (5 ms drain interval, FIFO 32-triplet limit = 8 ms).
+// 1 kHz tick: every 4th FIFO sample (inside drain). 100 Hz tick: every
+// SLOW_DIV-th outer iteration on the last drained sample.
 unsigned int hz = 200;
 const unsigned int SLOW_DIV = 2;   // 200 / 100
 unsigned int dtWrite = 1000 / hz;
@@ -55,9 +52,8 @@ int fileDate = 0;
 File f;
 
 double Acc = 0.;
-// Total FIFO triplets actually drained over the current 1-minute window.
-// Expected steady-state value ~= ODR (4000) * 60 = 240000. Deviations
-// indicate FIFO overflow or scheduler slip.
+// Total FIFO triplets drained per minute. Expected ~= 4000 * 60 = 240000;
+// deviation flags FIFO overflow or scheduler slip.
 uint32_t samp4kCount = 0;
 double AccThres0 = 5.;
 // double AccCount0 = 0.;  // sum disabled
@@ -90,9 +86,7 @@ const size_t ACCDATA_RESERVE = 256;
 volatile uint32_t dropCount = 0;
 volatile uint32_t batchOkCount = 0;
 
-// Display snapshot of the last completed minute. TaskRead copies the
-// threshold counters here just before resetting them; TaskSave reads
-// the snapshot to draw the 5-second status panel each minute.
+// Display snapshot: TaskRead copies counters here before reset; TaskSave reads.
 // double   dispSum0 = 0., dispSum1 = 0., dispSum2 = 0., dispSum3 = 0.;  // sum disabled
 uint32_t dispBin0 = 0,  dispBin1 = 0,  dispBin2 = 0,  dispBin3 = 0;   // 100 Hz
 uint32_t disp1k0  = 0,  disp1k1  = 0,  disp1k2  = 0,  disp1k3  = 0;   // 1000 Hz
@@ -143,9 +137,7 @@ void getDate() {
 }
 //==============================================================================
 
-// Safe TF-open helper that retries on failure.
-// Retries every 1 second, remounts the TF every 30 seconds
-//  to recover from  transient contact issues or write stalls.
+// Safe TF-open helper: retry every 1 s, remount every 30 s.
 static File openSDFileSafe(const char *path, const char *mode) {
   File f;
   uint32_t retry = 0;
@@ -239,12 +231,9 @@ static void rtcConfirmScreen() {
 
 //==============================================================================
 
-// Common tail for every RTC-setting path: mirror the just-written M5 RTC
-// into the system clock and show the 10-second confirmation screen.
-// Used by:
-//   - Set_RTC: after writing the NTP-derived time into the RTC
-//   - Manual_Set: after writing the user-input time into the RTC
-//   - setup() menu timeout: nothing else has touched the system clock yet
+// Common tail for every RTC-setting path (Set_RTC / Manual_Set / menu
+// timeout): mirror the just-written M5 RTC into the system clock and
+// show the 10-second confirmation screen.
 static void applyRtcAndConfirm() {
   auto rtcDt = M5.Rtc.getDateTime();
   struct tm tmRtc = {};
@@ -406,26 +395,46 @@ void Manual_Set() {
 
   drawAll();
 
+  // Long-press auto-repeat: HOLD_DELAY -> REPEAT_SLOW -> REPEAT_FAST after ACCEL_AFTER.
+  const uint32_t HOLD_DELAY_MS    = 400;
+  const uint32_t REPEAT_SLOW_MS   = 150;
+  const uint32_t REPEAT_FAST_MS   = 50;
+  const uint32_t ACCEL_AFTER_MS   = 2000;
+  int      holdBtn   = -1;          // adjust() idx (0..5), -1 = no hold
+  int      holdDelta = 0;
+  int      holdRow   = 0;           // upY or dnY (for in-button check)
+  uint32_t holdStart = 0;
+  uint32_t lastRepeat = 0;
+
   while (true) {
     M5.update();
     auto t = M5.Touch.getDetail();
+    uint32_t now = millis();
+
     if (t.wasPressed()) {
       int xt = t.x;
       int yt = t.y;
+      bool handled = false;
 
-      for (int i = 0; i < 6; i++) {
+      for (int i = 0; i < 6 && !handled; i++) {
         if (xt >= xs[i] && xt <= xs[i] + colW[i] &&
             yt >= upY  && yt <= upY  + btnH) {
           adjust(i, +1); drawAll();
+          holdBtn = i; holdDelta = +1; holdRow = upY;
+          holdStart = lastRepeat = now;
+          handled = true;
         }
       }
-      for (int i = 0; i < 6; i++) {
+      for (int i = 0; i < 6 && !handled; i++) {
         if (xt >= xs[i] && xt <= xs[i] + colW[i] &&
             yt >= dnY  && yt <= dnY  + btnH) {
           adjust(i, -1); drawAll();
+          holdBtn = i; holdDelta = -1; holdRow = dnY;
+          holdStart = lastRepeat = now;
+          handled = true;
         }
       }
-      if (xt >= 20 && xt <= 150 && yt >= 195 && yt <= 235) {
+      if (!handled && xt >= 20 && xt <= 150 && yt >= 195 && yt <= 235) {
         auto newdt = M5.Rtc.getDateTime();
         newdt.date.year   = year;
         newdt.date.month  = month;
@@ -433,10 +442,7 @@ void Manual_Set() {
         newdt.time.hours  = hour;
         newdt.time.minutes= minute;
         newdt.time.seconds= second;
-        // PCF8563-class RTCs store weekday in a separate register and do
-        // NOT derive it from the date. If we leave it untouched, RTC display
-        // shows the previous (wrong) weekday until next NTP sync. Compute
-        // it from the date with Sakamoto's method (0=Sun..6=Sat).
+        // PCF8563 stores weekday in a separate register; compute it from the date.
         {
           static const int sakamoto_t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
           int yy = year - (month < 3 ? 1 : 0);
@@ -445,15 +451,39 @@ void Manual_Set() {
         }
         M5.Rtc.setDateTime(&newdt);
 
-        // Mirror the new RTC value into the system clock + show 10 s
-        // confirmation. Identical tail to Set_RTC and the menu timeout.
+        // Mirror the new RTC value into the system clock + show 10 s confirmation.
         applyRtcAndConfirm();
         return;
       }
-      if (xt >= 170 && xt <= 300 && yt >= 195 && yt <= 235) {
+      if (!handled && xt >= 170 && xt <= 300 && yt >= 195 && yt <= 235) {
         return;
       }
     }
+
+    // While a +/- button is held, fire repeats after the initial delay, then accelerate.
+    if (holdBtn >= 0) {
+      if (!t.isPressed()) {
+        holdBtn = -1;
+      } else {
+        int xt = t.x, yt = t.y;
+        bool stillIn = (xt >= xs[holdBtn] && xt <= xs[holdBtn] + colW[holdBtn] &&
+                        yt >= holdRow    && yt <= holdRow    + btnH);
+        if (!stillIn) {
+          holdBtn = -1;
+        } else {
+          uint32_t held = now - holdStart;
+          if (held >= HOLD_DELAY_MS) {
+            uint32_t interval = (held >= ACCEL_AFTER_MS) ? REPEAT_FAST_MS
+                                                         : REPEAT_SLOW_MS;
+            if (now - lastRepeat >= interval) {
+              adjust(holdBtn, holdDelta); drawAll();
+              lastRepeat = now;
+            }
+          }
+        }
+      }
+    }
+
     delay(20);
   }
 }
@@ -731,7 +761,6 @@ void setup() {
   M5.begin(cfg);
   M5.Lcd.setBrightness(100);
 
-  // CSV header carrying the threshold values.
   accHeader  = "datetime";
   // accHeader += ",sum>=";  accHeader += AccThres0; accHeader += "gal,n>="; accHeader += AccThres0; accHeader += "gal";  // sum disabled
   // accHeader += ",sum>=";  accHeader += AccThres1; accHeader += "gal,n>="; accHeader += AccThres1; accHeader += "gal";  // sum disabled
@@ -782,10 +811,8 @@ void setup() {
   M5.Lcd.print("Tap a button:");
 
   int prevSec = -1;
-  // dispatched is hoisted out of the loop so the post-menu code can tell
-  // whether a handler ran (Wi-Fi / Reset RTC / Manual Set already sync the
-  // system clock + show rtcConfirmScreen) or the loop fell out via the 30 s
-  // timeout (which needs the catch-up call below).
+  // dispatched is visible to the post-menu code so the timeout path can
+  // run applyRtcAndConfirm() (handlers already do it themselves).
   bool dispatched = false;
   for (int i = 300; i > 0; --i) {
     M5.update();
@@ -820,18 +847,14 @@ void setup() {
   }
   //==============================================================================
 
-  // Initialize ADXL355
   adxl355.begin();
   adxl355.setRange(range);
   adxl355.setOutputDataRate(ODR);
   adxl355.setHpfFrequency(HPF);
   adxl355.setSynchronization(syncTime);
   adxl355.enableMeasurement();
-  // Drain any stale samples so TaskRead starts with an empty FIFO and
-  // the per-iteration drain count reflects ODR.
-  adxl355.clearFifo();
+  adxl355.clearFifo();   // start TaskRead with an empty FIFO
 
-  // Start SD
   while (!SD.begin(GPIO_NUM_4, SPI, 10000000)) {
     txtWrite("ERROR: SD CARD", BLACK);
     delay(100);
@@ -912,11 +935,8 @@ void TaskRead(void *pvParameters) {
     portEXIT_CRITICAL(&dtMux);
     sprintf(hhmm, "%02d:%02d", curHour, curMin);
 
-    // Drain every FIFO triplet available at this 5 ms tick (~20 triplets at
-    // ODR=4000 Hz). Each sample feeds the 4 kHz threshold count; every 4th
-    // sample also feeds the 1 kHz threshold count. The last drained sample
-    // (= newest) is reused for the 100 Hz threshold check on every
-    // SLOW_DIV-th outer iteration.
+    // Drain FIFO (~20 triplet/5ms): 4 kHz = each, 1 kHz = every 4th.
+    // 100 Hz uses last_Acc on SLOW_DIV-th outer iter (below).
     uint8_t fifoEntries = adxl355.getNumberOfFifoSamples();
     uint8_t nTriplets   = fifoEntries / 3;
     samp4kCount += nTriplets;
@@ -942,11 +962,9 @@ void TaskRead(void *pvParameters) {
         if (Acc >= AccThres3) binary1k3 += 1;
       }
     }
-    // Note: when nTriplets == 0 (rare; only at startup) Acc retains its
-    // previous value, which is acceptable for the 100 Hz check below.
+    // (nTriplets == 0 rare; Acc retains previous value, acceptable for 100 Hz.)
 
-    // 100 Hz threshold counts (every SLOW_DIV-th outer iteration on last_Acc;
-    // ESP32-clock-aligned, decimated, no LPF).
+    // 100 Hz threshold counts (every SLOW_DIV-th outer iter on last_Acc).
     slowTick++;
     if (slowTick >= SLOW_DIV) {
       slowTick = 0;
@@ -1054,8 +1072,7 @@ void TaskSave(void *pvParameters) {
       continue;
     }
 
-    // First batch: create the initial file using the post sec=0 RTC,
-    // so the file name reflects the actual data start date.
+    // First batch: create file with post sec=0 RTC so name matches start date.
     if (firstBatch) {
       auto firstDt = M5.Rtc.getDateTime();
       portENTER_CRITICAL(&dtMux);
@@ -1075,8 +1092,7 @@ void TaskSave(void *pvParameters) {
     dt = localDt;
     portEXIT_CRITICAL(&dtMux);
 
-    // Snapshot the last minute's threshold counters (published by TaskRead
-    // just before it reset them).
+    // Snapshot of last minute's counters (published by TaskRead before reset).
     // double   s0, s1, s2, s3;  // sum disabled
     uint32_t b0, b1, b2, b3;          // 100 Hz exceed counts
     uint32_t f0, f1, f2, f3;          // 1000 Hz exceed counts
@@ -1090,8 +1106,7 @@ void TaskSave(void *pvParameters) {
     samp4k = dispSamp4k;
     portEXIT_CRITICAL(&dispMux);
 
-    // Light up the screen for ~5 s with the just-completed minute summary,
-    // then go dark until the next batch arrives (~55 s later).
+    // 5 s status panel, then dark until the next batch.
     M5.Lcd.fillScreen(BLACK);
     M5.Lcd.setTextColor(WHITE, BLACK);
 
@@ -1124,9 +1139,7 @@ void TaskSave(void *pvParameters) {
     M5.Lcd.setTextColor(dropCount ? RED : WHITE, BLACK);
     M5.Lcd.printf("DROP: %lu", (unsigned long)dropCount);
     M5.Lcd.setTextColor(WHITE, BLACK);
-    // N4k = total FIFO triplets drained in the just-completed minute.
-    // Expected ~= 240000 (= ODR 4000 * 60 s); short-fall flags FIFO
-    // overflow or scheduler slip.
+    // N4k: total FIFO triplets drained per minute (expected ~= 240000).
     M5.Lcd.setCursor(0, 190);
     M5.Lcd.printf("N4k : %lu", (unsigned long)samp4k);
 
