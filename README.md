@@ -45,6 +45,7 @@ After any of the above (or after the 30 second timeout), measurement begins at t
  - Why three rates: the 100 Hz column is kept so existing rainfall coefficients still apply. The 1 kHz column gives a natural "one count per raindrop scale" (each ~5 ms impulse contributes ~5 counts). The 4 kHz column captures sub-millisecond impulses that 1 kHz subsampling may miss. Theoretical ratios are 4 : 10 : 40 (4kHz : 1kHz : 100Hz scaled to a common base).
  - Aliasing is allowed by design - only threshold counts matter, not spectra. For frequency analysis, see the [MEMS Seismometer](https://github.com/T40O0/ADXL355_SPI_M5_SD_FIR) instead.
  - **CSV format**: `datetime, n100Hz>=5gal, n100Hz>=10gal, n100Hz>=20gal, n100Hz>=30gal, n1kHz>=5gal, n1kHz>=10gal, n1kHz>=20gal, n1kHz>=30gal, n4kHz>=5gal, n4kHz>=10gal, n4kHz>=20gal, n4kHz>=30gal`.
+ - **Serial debug output**: the `>=5 gal` 100 Hz exceedance count is printed on Serial at each 100 Hz tick when `#define ENABLE_SERIAL_SAMPLES 1` at the top of the sketch. Default is `0` (disabled). Enable only for triggering / threshold-tuning checks.
  - **RTC year range**: measurements only start when the RTC year is in 2026..2099. Edit `setup()` if needed.
  - **NTP setup**: edit the defines near the top of the sketch to fit your environment.  
    `#define NTP_TIMEZONE  "your zone"`  

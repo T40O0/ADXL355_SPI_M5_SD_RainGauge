@@ -33,6 +33,10 @@
 #endif
 //==============================================================================
 
+// Per-100Hz-tick Serial output in TaskRead (debug only).
+// Set to 1 to print the >=5 gal exceedance count to the serial monitor.
+#define ENABLE_SERIAL_SAMPLES 0
+
 // Outer loop 200 Hz (5 ms drain interval, FIFO 32-triplet limit = 8 ms).
 // 1 kHz tick: every 4th FIFO sample (inside drain). 100 Hz tick: every
 // SLOW_DIV-th outer iteration on the last drained sample.
@@ -51,13 +55,12 @@ char fileName[30];
 int fileDate = 0;
 File f;
 
-double Acc = 0.;
 // Total FIFO triplets drained per minute. Expected ~= 4000 * 60 = 240000;
 // deviation flags FIFO overflow or scheduler slip.
 uint32_t samp4kCount = 0;
 double AccThres0 = 5.;
 // double AccCount0 = 0.;  // sum disabled
-int binaryCount0 = 0;     // 100 Hz exceed count (decimated last_Acc, no LPF)
+int binaryCount0 = 0;     // 100 Hz exceed count (decimated last sample, no LPF)
 int binary1k0     = 0;    // 1000 Hz exceed count (every 4th FIFO sample)
 int binary4k0     = 0;    // 4000 Hz exceed count (every FIFO sample, sensor LPF only)
 double AccThres1 = 10.0;
@@ -75,6 +78,13 @@ double AccThres3 = 30.;
 int binaryCount3 = 0;
 int binary1k3     = 0;
 int binary4k3     = 0;
+
+// Pre-computed squared thresholds. Comparing magSq = x^2+y^2+z^2 against
+// these avoids a sqrt() call per FIFO sample in the 4 kHz hot path.
+const double AccThres0Sq = AccThres0 * AccThres0;
+const double AccThres1Sq = AccThres1 * AccThres1;
+const double AccThres2Sq = AccThres2 * AccThres2;
+const double AccThres3Sq = AccThres3 * AccThres3;
 
 // CSV header carrying the threshold values for each column.
 String accHeader;
@@ -926,6 +936,9 @@ void TaskRead(void *pvParameters) {
   unsigned int i = 1;
   unsigned int slowTick = 0;       // 100 Hz tick: fires every SLOW_DIV outer iterations.
   unsigned int oneKTick = 0;       // 1 kHz tick: fires every 4th FIFO sample (4 kHz / 4).
+  // Squared magnitude (gal^2). The 100 Hz tick reuses the last value
+  // from the most recent FIFO drain (kept across outer iterations).
+  double magSq = 0.;
   String accData;
   accData.reserve(ACCDATA_RESERVE);
 
@@ -950,44 +963,45 @@ void TaskRead(void *pvParameters) {
     sprintf(hhmm, "%02d:%02d", curHour, curMin);
 
     // Drain FIFO (~20 triplet/5ms): 4 kHz = each, 1 kHz = every 4th.
-    // 100 Hz uses last_Acc on SLOW_DIV-th outer iter (below).
+    // 100 Hz uses the last magSq on SLOW_DIV-th outer iter (below).
     uint8_t fifoEntries = adxl355.getNumberOfFifoSamples();
     uint8_t nTriplets   = fifoEntries / 3;
     samp4kCount += nTriplets;
     for (uint8_t k = 0; k < nTriplets; k++) {
       accelerations = adxl355.getAccelerationsFromFifo();
-      Acc = sqrt(
+      magSq =
         accelerations.x * accelerations.x +
         accelerations.y * accelerations.y +
-        accelerations.z * accelerations.z
-      );
+        accelerations.z * accelerations.z;
       // 4000 Hz threshold counts (every FIFO sample, no decimation).
-      if (Acc >= AccThres0) binary4k0 += 1;
-      if (Acc >= AccThres1) binary4k1 += 1;
-      if (Acc >= AccThres2) binary4k2 += 1;
-      if (Acc >= AccThres3) binary4k3 += 1;
+      if (magSq >= AccThres0Sq) binary4k0 += 1;
+      if (magSq >= AccThres1Sq) binary4k1 += 1;
+      if (magSq >= AccThres2Sq) binary4k2 += 1;
+      if (magSq >= AccThres3Sq) binary4k3 += 1;
       // 1000 Hz threshold counts (every 4th FIFO sample = 4 kHz / 4).
       oneKTick++;
       if (oneKTick >= 4) {
         oneKTick = 0;
-        if (Acc >= AccThres0) binary1k0 += 1;
-        if (Acc >= AccThres1) binary1k1 += 1;
-        if (Acc >= AccThres2) binary1k2 += 1;
-        if (Acc >= AccThres3) binary1k3 += 1;
+        if (magSq >= AccThres0Sq) binary1k0 += 1;
+        if (magSq >= AccThres1Sq) binary1k1 += 1;
+        if (magSq >= AccThres2Sq) binary1k2 += 1;
+        if (magSq >= AccThres3Sq) binary1k3 += 1;
       }
     }
-    // (nTriplets == 0 rare; Acc retains previous value, acceptable for 100 Hz.)
+    // (nTriplets == 0 rare; magSq retains previous value, acceptable for 100 Hz.)
 
-    // 100 Hz threshold counts (every SLOW_DIV-th outer iter on last_Acc).
+    // 100 Hz threshold counts (every SLOW_DIV-th outer iter on last magSq).
     slowTick++;
     if (slowTick >= SLOW_DIV) {
       slowTick = 0;
-      if (Acc >= AccThres0) { /* AccCount0 += Acc; */ binaryCount0 += 1; }  // sum disabled
-      if (Acc >= AccThres1) { /* AccCount1 += Acc; */ binaryCount1 += 1; }  // sum disabled
-      if (Acc >= AccThres2) { /* AccCount2 += Acc; */ binaryCount2 += 1; }  // sum disabled
-      if (Acc >= AccThres3) { /* AccCount3 += Acc; */ binaryCount3 += 1; }  // sum disabled
+      if (magSq >= AccThres0Sq) { /* AccCount0 += sqrt(magSq); */ binaryCount0 += 1; }  // sum disabled
+      if (magSq >= AccThres1Sq) { /* AccCount1 += sqrt(magSq); */ binaryCount1 += 1; }  // sum disabled
+      if (magSq >= AccThres2Sq) { /* AccCount2 += sqrt(magSq); */ binaryCount2 += 1; }  // sum disabled
+      if (magSq >= AccThres3Sq) { /* AccCount3 += sqrt(magSq); */ binaryCount3 += 1; }  // sum disabled
+#if ENABLE_SERIAL_SAMPLES
       // Serial.print(AccCount0); Serial.print(", ");  // sum disabled
       Serial.println(binaryCount0);
+#endif
     }
 
     if (i >= hz * SDWriteTime) {
